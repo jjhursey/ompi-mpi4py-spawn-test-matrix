@@ -1,0 +1,96 @@
+# ------------------------------------------------------------
+# Base image: Ubuntu 22.04
+# ------------------------------------------------------------
+FROM ubuntu:22.04
+
+# ------------------------------------------------------------
+# Metadata
+# ------------------------------------------------------------
+LABEL maintainer="jhursey@us.ibm.com"
+
+ARG _BUILD_OMPI_VERSION_SHORT=v4.1
+ARG _BUILD_OMPI_VERSION=4.1.4
+ENV _BUILD_OMPI_VERSION=$_BUILD_OMPI_VERSION
+LABEL com.ibm.ompi.version=${_BUILD_OMPI_VERSION}
+
+# ------------------------------------------------------------
+# Install required packages
+# ------------------------------------------------------------
+RUN apt update && \
+    apt install -y python3 python-is-python3 pip git && \
+    apt install -y wget 
+
+# ------------------------------------------------------------
+# Install Open MPI
+# ------------------------------------------------------------
+ARG OMPI_INSTALL_PATH=/opt/hpc/local/openmpi
+ENV OMPI_INSTALL_PATH=$OMPI_INSTALL_PATH
+
+RUN cd /tmp && \
+    wget -q https://download.open-mpi.org/release/open-mpi/${_BUILD_OMPI_VERSION_SHORT}/openmpi-${_BUILD_OMPI_VERSION}.tar.gz && \
+    tar -zxf openmpi-${_BUILD_OMPI_VERSION}.tar.gz && \
+    cd openmpi-${_BUILD_OMPI_VERSION} && \
+    ./configure --prefix=${OMPI_INSTALL_PATH} \
+        --disable-debug && \
+    make -j 20 > /dev/null && \
+    make -j 20 install > /dev/null && \
+    cp config.log ${OMPI_INSTALL_PATH}/ && \
+    cd / && rm -rf /tmp/openmpi*
+
+ENV PATH="$OMPI_INSTALL_PATH/bin:${PATH}"
+ENV LD_LIBRARY_PATH="$OMPI_INSTALL_PATH/lib:${LD_LIBRARY_PATH}"
+
+# ------------------------------------------------------------
+# Adjust the default environment
+# ------------------------------------------------------------
+USER root
+
+RUN echo "export MPI_ROOT=$OMPI_INSTALL_PATH" >> /etc/bashrc && \
+    echo "export PATH=$OMPI_INSTALL_PATH/bin:\$PATH" >> /etc/bashrc && \
+    echo "export LD_LIBRARY_PATH=$OMPI_INSTALL_PATH/lib:\$LD_LIBRARY_PATH" >> /etc/bashrc
+
+# ------------------------------------------------------------
+# Create a user account
+# ------------------------------------------------------------
+RUN groupadd -g 1000 -r mpiuser && \
+    useradd -u 1000 --no-log-init -r -m -s /bin/bash -b /home -g mpiuser mpiuser && \
+    echo "mpiuser:mpiuser" | chpasswd
+
+USER mpiuser
+WORKDIR /home/mpiuser
+
+# ------------------------------------------------------------
+# Install mpi4py
+# ------------------------------------------------------------
+RUN cd /home/mpiuser && \
+    python -m pip install --upgrade setuptools pip wheel && \
+    git clone https://github.com/mpi4py/mpi4py.git && \
+    cd mpi4py && \
+    python -m pip wheel -vvv --wheel-dir=dist . && \
+    python -m pip install --no-index --find-links=dist mpi4py
+
+# ------------------------------------------------------------
+# Install Open MPI Public Test Suite
+# ------------------------------------------------------------
+RUN cd /home/mpiuser && \
+    git clone https://github.com/open-mpi/ompi-tests-public.git
+
+
+# ------------------------------------------------------------
+# mpi4py: Test configuration
+# ------------------------------------------------------------
+RUN cd /home/mpiuser && \
+    openmpi_mca_params=$HOME/.openmpi/mca-params.conf && \
+    mkdir -p $(dirname $openmpi_mca_params) && \
+    echo plm=isolated >> $openmpi_mca_params && \
+    echo rmaps_base_oversubscribe=true >> $openmpi_mca_params && \
+    echo btl_base_warn_component_unused=false >> $openmpi_mca_params && \
+    echo btl_vader_single_copy_mechanism=none >> $openmpi_mca_params
+
+RUN mkdir -p /home/mpiuser/local/testing
+COPY run-mpi4py-spawn-loop.sh /home/mpiuser/local/testing/
+COPY run-spawn-only.sh /home/mpiuser/local/testing/
+
+# ------------------------------------------------------------
+CMD "ompi_info"
+
